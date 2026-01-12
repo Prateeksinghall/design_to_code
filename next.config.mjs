@@ -8,12 +8,9 @@ const nextConfig = {
   },
   // Turbopack config (Next.js 16+)
   turbopack: {},
-  // Webpack config for Puppeteer (fallback)
-  webpack: (config, { isServer }) => {
-    if (isServer) {
-      // Exclude puppeteer from client bundle
-      config.externals = [...(config.externals || []), 'puppeteer']
-    }
+  // Webpack config - puppeteer-core doesn't need to be excluded
+  // (it doesn't include Chromium like regular puppeteer does)
+  webpack: (config) => {
     return config
   },
 }

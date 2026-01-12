@@ -3,21 +3,10 @@
 import type { Browser, Page } from "puppeteer-core"
 import type { WebsiteAnalysis, Color, DesignSystem } from "./types"
 
-// Dynamic imports for different environments
-let puppeteer: typeof import("puppeteer") | null = null // Only for local dev
-let puppeteerCore: typeof import("puppeteer-core") | null = null // For serverless (Vercel) - REQUIRED
-let chromium: typeof import("@sparticuz/chromium") | null = null // For serverless (Vercel) - REQUIRED
-
-/**
- * Check if running on Vercel serverless environment
- */
-function isVercelServerless(): boolean {
-  return !!(
-    process.env.VERCEL ||
-    process.env.AWS_LAMBDA_FUNCTION_NAME ||
-    process.env.VERCEL_ENV
-  )
-}
+// Dynamic imports - MUST use puppeteer-core + @sparticuz/chromium
+// Regular puppeteer will NOT work on Vercel
+let puppeteerCore: typeof import("puppeteer-core") | null = null
+let chromium: typeof import("@sparticuz/chromium") | null = null
 
 /**
  * Visual analyzer using headless browser to capture and analyze rendered pages
@@ -31,79 +20,50 @@ export class VisualAnalyzer {
   async init(): Promise<void> {
     if (!this.browser) {
       try {
-        const isServerless = isVercelServerless()
-        
-        // CRITICAL: On Vercel/serverless, ONLY use puppeteer-core + @sparticuz/chromium
-        // NEVER use regular puppeteer in serverless environments
-        if (isServerless) {
-          // Load @sparticuz/chromium - REQUIRED for Vercel
-          if (!chromium) {
-            const chromiumModule = await import("@sparticuz/chromium" as any).catch(() => null)
-            chromium = (chromiumModule?.default || chromiumModule) as typeof chromium
-          }
-          
-          if (!chromium) {
-            throw new Error(
-              "@sparticuz/chromium is required for serverless environments like Vercel. " +
-              "Regular puppeteer will NOT work on Vercel. " +
-              "Please install: npm install @sparticuz/chromium puppeteer-core"
-            )
-          }
-          
-          // Load puppeteer-core - REQUIRED for Vercel
-          if (!puppeteerCore) {
-            puppeteerCore = await import("puppeteer-core")
-          }
-          
-          if (!puppeteerCore) {
-            throw new Error("Failed to load puppeteer-core")
-          }
-          
-          const executablePath = await chromium.executablePath()
-          const chromiumArgs = chromium.args || []
-          const chromiumHeadless = chromium.headless
-          
-          // Configure launch options for serverless - MUST use @sparticuz/chromium
-          const launchOptions = {
-            args: chromiumArgs,
-            defaultViewport: chromium.defaultViewport || { width: 1920, height: 1080 },
-            executablePath,
-            headless: typeof chromiumHeadless === 'boolean' ? chromiumHeadless : true,
-          }
-          
-          // Use puppeteer-core for serverless - this is the ONLY way it works on Vercel
-          this.browser = (await puppeteerCore.launch(launchOptions)) as unknown as Browser
-        } else {
-          // Local development - use regular puppeteer (includes Chromium)
-          if (!puppeteer) {
-            puppeteer = await import("puppeteer")
-          }
-          
-          this.browser = (await puppeteer.launch({
-            headless: true,
-            args: [
-              "--no-sandbox",
-              "--disable-setuid-sandbox",
-              "--disable-dev-shm-usage",
-              "--disable-accelerated-2d-canvas",
-              "--disable-gpu",
-              "--disable-blink-features=AutomationControlled",
-              "--disable-features=IsolateOrigins,site-per-process",
-            ],
-          })) as unknown as Browser
+        // Load @sparticuz/chromium - REQUIRED
+        if (!chromium) {
+          const chromiumModule = await import("@sparticuz/chromium" as any).catch(() => null)
+          chromium = (chromiumModule?.default || chromiumModule) as typeof chromium
         }
-      } catch (error: any) {
-        console.error("Failed to launch Puppeteer browser:", error)
-        const isServerless = isVercelServerless()
-        if (isServerless) {
-          const errorMsg = error?.message || "Unknown error"
+        
+        if (!chromium) {
           throw new Error(
-            `Browser initialization failed on serverless: ${errorMsg}. ` +
-            `Vercel requires puppeteer-core with @sparticuz/chromium. ` +
-            `Regular puppeteer will NOT work on Vercel.`
+            "@sparticuz/chromium is required. " +
+            "Please install: npm install @sparticuz/chromium puppeteer-core"
           )
         }
-        throw new Error(`Browser initialization failed: ${error?.message || "Make sure Puppeteer is properly installed."}`)
+        
+        // Load puppeteer-core - REQUIRED
+        if (!puppeteerCore) {
+          puppeteerCore = await import("puppeteer-core")
+        }
+        
+        if (!puppeteerCore) {
+          throw new Error("Failed to load puppeteer-core")
+        }
+        
+        const executablePath = await chromium.executablePath()
+        const chromiumArgs = chromium.args || []
+        const chromiumHeadless = chromium.headless
+        
+        // Configure launch options - MUST use @sparticuz/chromium
+        const launchOptions = {
+          args: chromiumArgs,
+          defaultViewport: chromium.defaultViewport || { width: 1920, height: 1080 },
+          executablePath,
+          headless: typeof chromiumHeadless === 'boolean' ? chromiumHeadless : true,
+        }
+        
+        // Use puppeteer-core - this is the ONLY way it works
+        this.browser = (await puppeteerCore.launch(launchOptions)) as unknown as Browser
+      } catch (error: any) {
+        console.error("Failed to launch Puppeteer browser:", error)
+        const errorMsg = error?.message || "Unknown error"
+        throw new Error(
+          `Browser initialization failed: ${errorMsg}. ` +
+          `Vercel requires puppeteer-core with @sparticuz/chromium. ` +
+          `Regular puppeteer will NOT work on Vercel.`
+        )
       }
     }
   }
