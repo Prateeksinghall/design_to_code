@@ -38,7 +38,8 @@ export class VisualAnalyzer {
         if (isServerless) {
           // Load @sparticuz/chromium - REQUIRED for Vercel
           if (!chromium) {
-            chromium = await import("@sparticuz/chromium" as any).catch(() => null)
+            const chromiumModule = await import("@sparticuz/chromium" as any).catch(() => null)
+            chromium = (chromiumModule?.default || chromiumModule) as typeof chromium
           }
           
           if (!chromium) {
@@ -52,6 +53,10 @@ export class VisualAnalyzer {
           // Load puppeteer-core - REQUIRED for Vercel
           if (!puppeteerCore) {
             puppeteerCore = await import("puppeteer-core")
+          }
+          
+          if (!puppeteerCore) {
+            throw new Error("Failed to load puppeteer-core")
           }
           
           const executablePath = await chromium.executablePath()
