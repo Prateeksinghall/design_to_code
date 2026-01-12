@@ -204,4 +204,6 @@ export function getVisualAnalyzer(): VisualAnalyzer {
     instance = new VisualAnalyzer()
   }
   return instance
+
+
 }
