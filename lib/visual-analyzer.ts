@@ -1,5 +1,23 @@
-import puppeteer, { type Browser, type Page } from "puppeteer"
+// IMPORTANT: On Vercel, we MUST use puppeteer-core + @sparticuz/chromium
+// Regular puppeteer will NOT work on Vercel (tries to install full Chromium binary)
+import type { Browser, Page } from "puppeteer-core"
 import type { WebsiteAnalysis, Color, DesignSystem } from "./types"
+
+// Dynamic imports for different environments
+let puppeteer: typeof import("puppeteer") | null = null // Only for local dev
+let puppeteerCore: typeof import("puppeteer-core") | null = null // For serverless (Vercel) - REQUIRED
+let chromium: typeof import("@sparticuz/chromium") | null = null // For serverless (Vercel) - REQUIRED
+
+/**
+ * Check if running on Vercel serverless environment
+ */
+function isVercelServerless(): boolean {
+  return !!(
+    process.env.VERCEL ||
+    process.env.AWS_LAMBDA_FUNCTION_NAME ||
+    process.env.VERCEL_ENV
+  )
+}
 
 /**
  * Visual analyzer using headless browser to capture and analyze rendered pages
@@ -13,21 +31,74 @@ export class VisualAnalyzer {
   async init(): Promise<void> {
     if (!this.browser) {
       try {
-        this.browser = await puppeteer.launch({
-          headless: true,
-          args: [
-            "--no-sandbox",
-            "--disable-setuid-sandbox",
-            "--disable-dev-shm-usage",
-            "--disable-accelerated-2d-canvas",
-            "--disable-gpu",
-            "--disable-blink-features=AutomationControlled", // Hide automation
-            "--disable-features=IsolateOrigins,site-per-process",
-          ],
-        })
-      } catch (error) {
+        const isServerless = isVercelServerless()
+        
+        // CRITICAL: On Vercel/serverless, ONLY use puppeteer-core + @sparticuz/chromium
+        // NEVER use regular puppeteer in serverless environments
+        if (isServerless) {
+          // Load @sparticuz/chromium - REQUIRED for Vercel
+          if (!chromium) {
+            chromium = await import("@sparticuz/chromium" as any).catch(() => null)
+          }
+          
+          if (!chromium) {
+            throw new Error(
+              "@sparticuz/chromium is required for serverless environments like Vercel. " +
+              "Regular puppeteer will NOT work on Vercel. " +
+              "Please install: npm install @sparticuz/chromium puppeteer-core"
+            )
+          }
+          
+          // Load puppeteer-core - REQUIRED for Vercel
+          if (!puppeteerCore) {
+            puppeteerCore = await import("puppeteer-core")
+          }
+          
+          const executablePath = await chromium.executablePath()
+          const chromiumArgs = chromium.args || []
+          const chromiumHeadless = chromium.headless
+          
+          // Configure launch options for serverless - MUST use @sparticuz/chromium
+          const launchOptions = {
+            args: chromiumArgs,
+            defaultViewport: chromium.defaultViewport || { width: 1920, height: 1080 },
+            executablePath,
+            headless: typeof chromiumHeadless === 'boolean' ? chromiumHeadless : true,
+          }
+          
+          // Use puppeteer-core for serverless - this is the ONLY way it works on Vercel
+          this.browser = (await puppeteerCore.launch(launchOptions)) as unknown as Browser
+        } else {
+          // Local development - use regular puppeteer (includes Chromium)
+          if (!puppeteer) {
+            puppeteer = await import("puppeteer")
+          }
+          
+          this.browser = (await puppeteer.launch({
+            headless: true,
+            args: [
+              "--no-sandbox",
+              "--disable-setuid-sandbox",
+              "--disable-dev-shm-usage",
+              "--disable-accelerated-2d-canvas",
+              "--disable-gpu",
+              "--disable-blink-features=AutomationControlled",
+              "--disable-features=IsolateOrigins,site-per-process",
+            ],
+          })) as unknown as Browser
+        }
+      } catch (error: any) {
         console.error("Failed to launch Puppeteer browser:", error)
-        throw new Error("Browser initialization failed. Make sure Puppeteer is properly installed.")
+        const isServerless = isVercelServerless()
+        if (isServerless) {
+          const errorMsg = error?.message || "Unknown error"
+          throw new Error(
+            `Browser initialization failed on serverless: ${errorMsg}. ` +
+            `Vercel requires puppeteer-core with @sparticuz/chromium. ` +
+            `Regular puppeteer will NOT work on Vercel.`
+          )
+        }
+        throw new Error(`Browser initialization failed: ${error?.message || "Make sure Puppeteer is properly installed."}`)
       }
     }
   }
@@ -93,17 +164,31 @@ export class VisualAnalyzer {
       }
 
       // Take screenshot
-      const screenshot = await page.screenshot({
+      // On Vercel with @sparticuz/chromium, screenshot might return Buffer or string
+      const screenshot: string | Buffer = await page.screenshot({
         type: "png",
         fullPage: false, // Only capture viewport
         encoding: "base64",
-      })
+      }) as string | Buffer
 
-      if (!screenshot || typeof screenshot !== "string") {
-        throw new Error("Screenshot capture returned invalid data")
+      if (!screenshot) {
+        throw new Error("Screenshot capture returned null or undefined")
       }
 
-      return `data:image/png;base64,${screenshot}`
+      // Ensure screenshot is a string (base64 encoded)
+      let screenshotString: string
+      if (typeof screenshot === "string") {
+        screenshotString = screenshot
+      } else {
+        // Convert Buffer to base64 string
+        screenshotString = screenshot.toString("base64")
+      }
+
+      if (!screenshotString || screenshotString.length === 0) {
+        throw new Error("Screenshot capture returned empty data after conversion")
+      }
+
+      return `data:image/png;base64,${screenshotString}`
     } catch (error) {
       console.error(`Screenshot capture failed for ${url}:`, error)
       throw error // Re-throw to be caught by caller
