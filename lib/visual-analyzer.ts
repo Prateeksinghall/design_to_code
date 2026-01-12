@@ -1,5 +1,6 @@
 import puppeteer, { Browser } from "puppeteer-core"
 import chromium from "@sparticuz/chromium"
+import fs from "fs"
 import type { Color } from "./types"
 
 /**
@@ -22,20 +23,33 @@ function getLocalChromePath(): string {
   return "/usr/bin/google-chrome"
 }
 
+/**
+ * 🔥 Force fresh Chromium extraction on Vercel
+ * Fixes: libnss3.so missing error
+ */
+function forceFreshChromium() {
+  if (!isVercel) return
+
+  const chromiumPath = "/tmp/chromium"
+
+  try {
+    if (fs.existsSync(chromiumPath)) {
+      console.warn("♻️ Removing stale Chromium from /tmp")
+      fs.rmSync(chromiumPath, { recursive: true, force: true })
+    }
+  } catch (err) {
+    console.warn("⚠️ Failed to clean Chromium cache", err)
+  }
+}
+
 export class VisualAnalyzer {
   private browser: Browser | null = null
   private launching = false
 
-  /**
-   * Ensure browser is healthy
-   */
   private isBrowserHealthy(): boolean {
     return !!this.browser && this.browser.isConnected()
   }
 
-  /**
-   * Force close browser
-   */
   private async resetBrowser() {
     try {
       if (this.browser) {
@@ -49,7 +63,7 @@ export class VisualAnalyzer {
   }
 
   /**
-   * Initialize or reinitialize browser
+   * Initialize browser (self-healing)
    */
   async init(): Promise<void> {
     if (this.isBrowserHealthy() || this.launching) return
@@ -63,21 +77,23 @@ export class VisualAnalyzer {
       await this.resetBrowser()
 
       if (isVercel) {
-        const executablePath = await chromium.executablePath()
+        // 🔥 CRITICAL FIX
+        forceFreshChromium()
 
+        const executablePath = await chromium.executablePath()
         console.log("🧭 Chromium path:", executablePath)
 
         this.browser = await puppeteer.launch({
           executablePath,
+          headless: chromium.headless,
+          defaultViewport: chromium.defaultViewport,
+          ignoreHTTPSErrors: true,
           args: [
             ...chromium.args,
             "--disable-dev-shm-usage",
             "--disable-gpu",
             "--single-process",
           ],
-          headless: chromium.headless,
-          defaultViewport: chromium.defaultViewport,
-          ignoreHTTPSErrors: true,
         })
       } else {
         this.browser = await puppeteer.launch({
@@ -104,7 +120,7 @@ export class VisualAnalyzer {
   }
 
   /**
-   * Create a safe page (auto-heal)
+   * Create page with auto-recovery
    */
   private async newSafePage() {
     try {
@@ -128,7 +144,7 @@ export class VisualAnalyzer {
       const screenshot = await page.screenshot({
         type: "png",
         encoding: "base64",
-        fullPage: true,
+        fullPage: false,
       })
 
       return `data:image/png;base64,${screenshot}`
@@ -229,7 +245,8 @@ export class VisualAnalyzer {
 }
 
 /**
- * Singleton instance (SAFE)
+ * ⚠️ OPTIONAL SINGLETON
+ * Safe to remove if you want full stateless behavior
  */
 let instance: VisualAnalyzer | null = null
 
