@@ -5,7 +5,7 @@ import type { Color } from "./types"
 /**
  * Detect Vercel environment
  */
-const isVercel = !!process.env.VERCEL
+const isVercel = process.env.VERCEL === "1"
 
 /**
  * Resolve local Chrome executable path
@@ -19,13 +19,9 @@ function getLocalChromePath(): string {
     return "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
   }
 
-  // Linux
   return "/usr/bin/google-chrome"
 }
 
-/**
- * Visual analyzer using headless browser to capture and analyze rendered pages
- */
 export class VisualAnalyzer {
   private browser: Browser | null = null
 
@@ -37,29 +33,36 @@ export class VisualAnalyzer {
 
     try {
       console.log("🚀 Launching browser...")
+      console.log("🌍 Vercel:", isVercel)
 
       if (isVercel) {
-        console.log("🌐 Environment: Vercel")
-
+        // ✅ VERCEL / AWS LAMBDA SAFE CONFIG
         this.browser = await puppeteer.launch({
-          args: chromium.args,
           executablePath: await chromium.executablePath(),
+          args: [
+            ...chromium.args,
+            "--disable-dev-shm-usage",
+            "--disable-gpu",
+            "--single-process",
+          ],
           headless: chromium.headless,
           defaultViewport: chromium.defaultViewport,
+          ignoreHTTPSErrors: true,
         })
       } else {
-        const executablePath = getLocalChromePath()
-        console.log("💻 Environment: Local")
-        console.log("🧭 Chrome path:", executablePath)
-
+        // ✅ LOCAL CONFIG
         this.browser = await puppeteer.launch({
-          executablePath,
+          executablePath: getLocalChromePath(),
           headless: true,
-          args: ["--no-sandbox", "--disable-setuid-sandbox"],
+          args: [
+            "--no-sandbox",
+            "--disable-setuid-sandbox",
+            "--disable-dev-shm-usage",
+          ],
         })
       }
 
-      console.log("✅ Browser launched")
+      console.log("✅ Browser launched successfully")
     } catch (error: any) {
       console.error("❌ Failed to launch browser:", error)
       throw new Error(
@@ -68,9 +71,6 @@ export class VisualAnalyzer {
     }
   }
 
-  /**
-   * Close browser instance
-   */
   async close(): Promise<void> {
     if (this.browser) {
       await this.browser.close()
@@ -79,23 +79,13 @@ export class VisualAnalyzer {
     }
   }
 
-  /**
-   * Capture screenshot (Base64)
-   */
   async captureScreenshot(url: string): Promise<string> {
     await this.init()
     const page = await this.browser!.newPage()
 
     try {
-      console.log("🌍 Navigating to:", url)
-
       await page.setViewport({ width: 1920, height: 1080 })
-      await page.goto(url, {
-        waitUntil: "load",
-        timeout: 30000,
-      })
-
-      console.log("📸 Taking screenshot...")
+      await page.goto(url, { waitUntil: "networkidle2", timeout: 30000 })
 
       const screenshot = await page.screenshot({
         type: "png",
@@ -103,48 +93,34 @@ export class VisualAnalyzer {
         fullPage: true,
       })
 
-      console.log("✅ Screenshot captured")
-
       return `data:image/png;base64,${screenshot}`
-    } catch (error) {
-      console.error("❌ Screenshot failed:", error)
-      throw error
     } finally {
       await page.close()
     }
   }
 
-  /**
-   * Fetch rendered HTML
-   */
   async fetchHTML(url: string): Promise<string> {
     await this.init()
     const page = await this.browser!.newPage()
 
     try {
-      await page.goto(url, {
-        waitUntil: "domcontentloaded",
-        timeout: 20000,
-      })
-
+      await page.goto(url, { waitUntil: "domcontentloaded", timeout: 20000 })
       return await page.content()
     } finally {
       await page.close()
     }
   }
 
-  /**
-   * Extract visual colors
-   */
   async extractVisualColors(url: string): Promise<Color[]> {
     await this.init()
     const page = await this.browser!.newPage()
 
     try {
-      await page.goto(url, { waitUntil: "load", timeout: 30000 })
+      await page.goto(url, { waitUntil: "networkidle2", timeout: 30000 })
 
       const colors = await page.evaluate(() => {
         const set = new Set<string>()
+
         const rgbToHex = (r: number, g: number, b: number) =>
           "#" + [r, g, b].map(x => x.toString(16).padStart(2, "0")).join("")
 
@@ -170,43 +146,37 @@ export class VisualAnalyzer {
     }
   }
 
-  /**
-   * Extract typography
-   */
   async extractVisualTypography(url: string) {
     await this.init()
     const page = await this.browser!.newPage()
 
     try {
-      await page.goto(url, { waitUntil: "load", timeout: 30000 })
+      await page.goto(url, { waitUntil: "networkidle2", timeout: 30000 })
 
       return await page.evaluate(() => {
-        const data: any[] = []
-        document.querySelectorAll("h1,h2,h3,p,span").forEach(el => {
+        return Array.from(
+          document.querySelectorAll("h1,h2,h3,p,span")
+        ).slice(0, 6).map(el => {
           const s = getComputedStyle(el)
-          data.push({
+          return {
             fontFamily: s.fontFamily.split(",")[0],
             fontSize: s.fontSize,
             fontWeight: s.fontWeight,
             usage: el.tagName.startsWith("H") ? "heading" : "body",
-          })
+          }
         })
-        return data.slice(0, 6)
       })
     } finally {
       await page.close()
     }
   }
 
-  /**
-   * Analyze layout
-   */
   async analyzeVisualLayout(url: string) {
     await this.init()
     const page = await this.browser!.newPage()
 
     try {
-      await page.goto(url, { waitUntil: "load", timeout: 30000 })
+      await page.goto(url, { waitUntil: "networkidle2", timeout: 30000 })
 
       return await page.evaluate(() => {
         const sections = ["header", "nav", "main", "section", "footer"].filter(tag =>
