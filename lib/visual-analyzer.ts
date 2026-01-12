@@ -24,21 +24,51 @@ function getLocalChromePath(): string {
 
 export class VisualAnalyzer {
   private browser: Browser | null = null
+  private launching = false
 
   /**
-   * Initialize browser instance
+   * Ensure browser is healthy
+   */
+  private isBrowserHealthy(): boolean {
+    return !!this.browser && this.browser.isConnected()
+  }
+
+  /**
+   * Force close browser
+   */
+  private async resetBrowser() {
+    try {
+      if (this.browser) {
+        await this.browser.close()
+      }
+    } catch {
+      // ignore
+    } finally {
+      this.browser = null
+    }
+  }
+
+  /**
+   * Initialize or reinitialize browser
    */
   async init(): Promise<void> {
-    if (this.browser) return
+    if (this.isBrowserHealthy() || this.launching) return
+
+    this.launching = true
 
     try {
       console.log("🚀 Launching browser...")
       console.log("🌍 Vercel:", isVercel)
 
+      await this.resetBrowser()
+
       if (isVercel) {
-        // ✅ VERCEL / AWS LAMBDA SAFE CONFIG
+        const executablePath = await chromium.executablePath()
+
+        console.log("🧭 Chromium path:", executablePath)
+
         this.browser = await puppeteer.launch({
-          executablePath: await chromium.executablePath(),
+          executablePath,
           args: [
             ...chromium.args,
             "--disable-dev-shm-usage",
@@ -50,7 +80,6 @@ export class VisualAnalyzer {
           ignoreHTTPSErrors: true,
         })
       } else {
-        // ✅ LOCAL CONFIG
         this.browser = await puppeteer.launch({
           executablePath: getLocalChromePath(),
           headless: true,
@@ -64,24 +93,33 @@ export class VisualAnalyzer {
 
       console.log("✅ Browser launched successfully")
     } catch (error: any) {
-      console.error("❌ Failed to launch browser:", error)
+      console.error("❌ Browser launch failed:", error)
+      await this.resetBrowser()
       throw new Error(
         `Browser initialization failed: ${error?.message || "Unknown error"}`
       )
+    } finally {
+      this.launching = false
     }
   }
 
-  async close(): Promise<void> {
-    if (this.browser) {
-      await this.browser.close()
-      this.browser = null
-      console.log("🛑 Browser closed")
+  /**
+   * Create a safe page (auto-heal)
+   */
+  private async newSafePage() {
+    try {
+      await this.init()
+      return await this.browser!.newPage()
+    } catch {
+      console.warn("♻️ Browser unhealthy, retrying...")
+      await this.resetBrowser()
+      await this.init()
+      return await this.browser!.newPage()
     }
   }
 
   async captureScreenshot(url: string): Promise<string> {
-    await this.init()
-    const page = await this.browser!.newPage()
+    const page = await this.newSafePage()
 
     try {
       await page.setViewport({ width: 1920, height: 1080 })
@@ -100,8 +138,7 @@ export class VisualAnalyzer {
   }
 
   async fetchHTML(url: string): Promise<string> {
-    await this.init()
-    const page = await this.browser!.newPage()
+    const page = await this.newSafePage()
 
     try {
       await page.goto(url, { waitUntil: "domcontentloaded", timeout: 20000 })
@@ -112,8 +149,7 @@ export class VisualAnalyzer {
   }
 
   async extractVisualColors(url: string): Promise<Color[]> {
-    await this.init()
-    const page = await this.browser!.newPage()
+    const page = await this.newSafePage()
 
     try {
       await page.goto(url, { waitUntil: "networkidle2", timeout: 30000 })
@@ -147,33 +183,31 @@ export class VisualAnalyzer {
   }
 
   async extractVisualTypography(url: string) {
-    await this.init()
-    const page = await this.browser!.newPage()
+    const page = await this.newSafePage()
 
     try {
       await page.goto(url, { waitUntil: "networkidle2", timeout: 30000 })
 
-      return await page.evaluate(() => {
-        return Array.from(
-          document.querySelectorAll("h1,h2,h3,p,span")
-        ).slice(0, 6).map(el => {
-          const s = getComputedStyle(el)
-          return {
-            fontFamily: s.fontFamily.split(",")[0],
-            fontSize: s.fontSize,
-            fontWeight: s.fontWeight,
-            usage: el.tagName.startsWith("H") ? "heading" : "body",
-          }
-        })
-      })
+      return await page.evaluate(() =>
+        Array.from(document.querySelectorAll("h1,h2,h3,p,span"))
+          .slice(0, 6)
+          .map(el => {
+            const s = getComputedStyle(el)
+            return {
+              fontFamily: s.fontFamily.split(",")[0],
+              fontSize: s.fontSize,
+              fontWeight: s.fontWeight,
+              usage: el.tagName.startsWith("H") ? "heading" : "body",
+            }
+          })
+      )
     } finally {
       await page.close()
     }
   }
 
   async analyzeVisualLayout(url: string) {
-    await this.init()
-    const page = await this.browser!.newPage()
+    const page = await this.newSafePage()
 
     try {
       await page.goto(url, { waitUntil: "networkidle2", timeout: 30000 })
@@ -195,7 +229,7 @@ export class VisualAnalyzer {
 }
 
 /**
- * Singleton instance
+ * Singleton instance (SAFE)
  */
 let instance: VisualAnalyzer | null = null
 
@@ -204,6 +238,4 @@ export function getVisualAnalyzer(): VisualAnalyzer {
     instance = new VisualAnalyzer()
   }
   return instance
-
-
 }
