@@ -13,10 +13,5 @@
       "maxDuration": 60
     }
   },
-  "env": {
-    "NEXT_PUBLIC_APP_URL": {
-      "description": "Application URL",
-      "required": false
-    }
-  }
+  "env": {}
 }
