@@ -17,18 +17,78 @@ export async function analyzeWebsite(
     throw new Error("Invalid URL provided")
   }
 
-  // Always fetch HTML for title and basic structure
-  const response = await fetch(url, {
-    headers: {
-      "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-    },
-  })
+  let html: string = ""
+  let usePuppeteerFallback = false
 
-  if (!response.ok) {
-    throw new Error(`Failed to fetch website: ${response.status}`)
+  // Always fetch HTML for title and basic structure
+  // Add timeout and better headers for Vercel compatibility
+  const controller = new AbortController()
+  const timeoutId = setTimeout(() => controller.abort(), 30000) // 30 second timeout
+
+  let response: Response | undefined
+  try {
+    response = await fetch(url, {
+      headers: {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Accept-Encoding": "gzip, deflate, br",
+        "Connection": "keep-alive",
+        "Upgrade-Insecure-Requests": "1",
+        "Sec-Fetch-Dest": "document",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Site": "none",
+        "Cache-Control": "max-age=0",
+      },
+      signal: controller.signal,
+      redirect: "follow",
+    })
+    clearTimeout(timeoutId)
+
+    if (!response.ok) {
+      if (response.status === 403 || response.status === 401 || response.status === 429 || response.status >= 500) {
+        console.log(`Fetch failed with status ${response.status}, falling back to Puppeteer for ${url}`)
+        usePuppeteerFallback = true
+      } else {
+        throw new Error(`Failed to fetch website: ${response.status} ${response.statusText}`)
+      }
+    } else {
+      html = await response.text()
+    }
+  } catch (fetchError: any) {
+    clearTimeout(timeoutId)
+
+    if (
+      fetchError.name === 'AbortError' ||
+      fetchError.code === 'ENOTFOUND' ||
+      fetchError.code === 'ECONNREFUSED' ||
+      fetchError.message?.includes('fetch failed') ||
+      fetchError.message?.includes('blocked')
+    ) {
+      console.log(`Fetch failed, falling back to Puppeteer for ${url}:`, fetchError.message)
+      usePuppeteerFallback = true
+    } else {
+      if (fetchError.name === 'AbortError') {
+        throw new Error("Request timeout: The website took too long to respond. This might be due to slow loading or network restrictions.")
+      }
+      if (fetchError.code === 'ENOTFOUND' || fetchError.code === 'ECONNREFUSED') {
+        throw new Error(`Network error: Unable to connect to the website. The domain might be invalid or unreachable.`)
+      }
+      throw new Error(`Failed to fetch website: ${fetchError.message || 'Unknown error'}`)
+    }
   }
 
-  const html = await response.text()
+  // Use Puppeteer as fallback if fetch was blocked or failed
+  if (usePuppeteerFallback) {
+    try {
+      console.log(`Using Puppeteer to fetch HTML for ${url}`)
+      const visualAnalyzer = getVisualAnalyzer()
+      html = await visualAnalyzer.fetchHTML(url)
+      console.log(`Successfully fetched HTML using Puppeteer for ${url}`)
+    } catch (puppeteerError: any) {
+      throw new Error(`Failed to fetch website using browser: ${puppeteerError.message || 'The website may be blocking automated access or taking too long to load.'}`)
+    }
+  }
   const title = extractPageTitle(html) || urlObj.hostname
 
   // Extract design system from HTML (primary method - reliable)

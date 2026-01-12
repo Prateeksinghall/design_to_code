@@ -119,6 +119,70 @@ export class VisualAnalyzer {
   }
 
   /**
+   * Fetch HTML content using Puppeteer (fallback for blocked requests)
+   */
+  async fetchHTML(url: string): Promise<string> {
+    if (!this.browser) {
+      await this.init()
+    }
+
+    const page = await this.browser!.newPage()
+    try {
+      // Set viewport size
+      await page.setViewport({ width: 1920, height: 1080 })
+
+      // Set user agent to avoid bot detection
+      await page.setUserAgent(
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+      )
+
+      // Additional stealth techniques to avoid bot detection
+      await page.evaluateOnNewDocument(() => {
+        // Remove webdriver flag
+        Object.defineProperty((window as any).navigator, 'webdriver', {
+          get: () => false,
+        })
+        
+        // Override chrome object
+        (window as any).chrome = {
+          runtime: {},
+        }
+      })
+
+      // Navigate to URL with timeout and error handling
+      try {
+        await page.goto(url, {
+          waitUntil: "domcontentloaded", // Faster - waits for DOM, not all resources
+          timeout: 20000,
+        })
+        // Wait a bit for critical resources
+        await new Promise((resolve) => setTimeout(resolve, 500))
+      } catch (navError) {
+        console.warn(`Fast navigation failed for ${url}, trying networkidle2:`, navError)
+        // Fallback to networkidle2 if domcontentloaded fails
+        try {
+          await page.goto(url, {
+            waitUntil: "networkidle2",
+            timeout: 30000,
+          })
+        } catch (fallbackError) {
+          console.warn(`Navigation failed for ${url}:`, fallbackError)
+          throw fallbackError
+        }
+      }
+
+      // Get the HTML content
+      const html = await page.content()
+      return html
+    } catch (error) {
+      console.error(`Failed to fetch HTML for ${url}:`, error)
+      throw error
+    } finally {
+      await page.close()
+    }
+  }
+
+  /**
    * Capture screenshot of the website
    */
   async captureScreenshot(url: string): Promise<string> {
