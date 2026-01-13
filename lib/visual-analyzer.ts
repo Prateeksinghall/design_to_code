@@ -1,4 +1,4 @@
-import puppeteer from "puppeteer-core"
+import * as puppeteer from "puppeteer-core"
 import chromium from "@sparticuz/chromium"
 import type { Browser } from "puppeteer-core"
 import type { Color } from "./types"
@@ -9,7 +9,7 @@ import type { Color } from "./types"
 const isVercel = !!process.env.VERCEL
 
 /**
- * Cache Chromium executable path (SAFE)
+ * Cache Chromium executable path
  */
 let cachedChromiumPath: string | null = null
 
@@ -21,7 +21,6 @@ async function getChromiumExecutablePath(): Promise<string> {
 
     console.log("🧭 Chromium executable:", cachedChromiumPath)
   }
-
   return cachedChromiumPath
 }
 
@@ -32,25 +31,32 @@ function getLocalChromePath(): string {
   if (process.platform === "win32") {
     return "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe"
   }
-
   if (process.platform === "darwin") {
     return "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
   }
-
   return "/usr/bin/google-chrome"
 }
 
 /**
- * Launch browser (PER REQUEST – serverless safe)
+ * Launch browser (Vercel-safe)
  */
 async function launchBrowser(): Promise<Browser> {
   return puppeteer.launch({
     executablePath: await getChromiumExecutablePath(),
-    headless: isVercel ? chromium.headless : true,
-    args: isVercel ? chromium.args : ["--no-sandbox"],
+    headless: chromium.headless,
+    args: chromium.args,
     defaultViewport: chromium.defaultViewport,
     ignoreHTTPSErrors: true,
   })
+}
+
+/**
+ * Singleton accessor (important for serverless)
+ */
+let analyzer: VisualAnalyzer | null = null
+export function getVisualAnalyzer(): VisualAnalyzer {
+  if (!analyzer) analyzer = new VisualAnalyzer()
+  return analyzer
 }
 
 export class VisualAnalyzer {
@@ -85,7 +91,10 @@ export class VisualAnalyzer {
     const page = await browser.newPage()
 
     try {
-      await page.goto(url, { waitUntil: "domcontentloaded", timeout: 20000 })
+      await page.goto(url, {
+        waitUntil: "domcontentloaded",
+        timeout: 20000,
+      })
       return await page.content()
     } finally {
       await page.close()
@@ -110,17 +119,15 @@ export class VisualAnalyzer {
           "#" + [r, g, b].map(x => x.toString(16).padStart(2, "0")).join("")
 
         document.querySelectorAll("*").forEach(el => {
-          const styles = getComputedStyle(el)
-          const extract = (value: string) => {
-            const match = value.match(/rgba?\((\d+),\s*(\d+),\s*(\d+)/)
-            if (match) {
-              set.add(rgbToHex(+match[1], +match[2], +match[3]))
-            }
+          const s = getComputedStyle(el)
+          const extract = (v: string) => {
+            const m = v.match(/rgba?\((\d+),\s*(\d+),\s*(\d+)/)
+            if (m) set.add(rgbToHex(+m[1], +m[2], +m[3]))
           }
 
-          extract(styles.color)
-          extract(styles.backgroundColor)
-          extract(styles.borderColor)
+          extract(s.color)
+          extract(s.backgroundColor)
+          extract(s.borderColor)
         })
 
         return Array.from(set)
@@ -130,62 +137,6 @@ export class VisualAnalyzer {
         hex,
         usage: ["primary", "secondary", "accent", "neutral"][i % 4] as any,
       }))
-    } finally {
-      await page.close()
-      await browser.close()
-    }
-  }
-
-  /**
-   * Extract typography styles
-   */
-  async extractVisualTypography(url: string) {
-    const browser = await launchBrowser()
-    const page = await browser.newPage()
-
-    try {
-      await page.goto(url, { waitUntil: "networkidle2", timeout: 30000 })
-
-      return await page.evaluate(() =>
-        Array.from(document.querySelectorAll("h1,h2,h3,h4,p,span"))
-          .slice(0, 10)
-          .map(el => {
-            const s = getComputedStyle(el)
-            return {
-              fontFamily: s.fontFamily.split(",")[0],
-              fontSize: s.fontSize,
-              fontWeight: s.fontWeight,
-              lineHeight: s.lineHeight,
-              usage: el.tagName.startsWith("H") ? "heading" : "body",
-            }
-          })
-      )
-    } finally {
-      await page.close()
-      await browser.close()
-    }
-  }
-
-  /**
-   * Analyze layout structure
-   */
-  async analyzeVisualLayout(url: string) {
-    const browser = await launchBrowser()
-    const page = await browser.newPage()
-
-    try {
-      await page.goto(url, { waitUntil: "networkidle2", timeout: 30000 })
-
-      return await page.evaluate(() => {
-        const sections = ["header", "nav", "main", "section", "footer"].filter(tag =>
-          document.querySelector(tag)
-        )
-
-        return {
-          type: sections.length > 2 ? "multi-section" : "single-section",
-          sections,
-        }
-      })
     } finally {
       await page.close()
       await browser.close()

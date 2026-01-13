@@ -1,6 +1,8 @@
 import { type NextRequest, NextResponse } from "next/server"
 import { analyzeWebsite } from "@/lib/analyzer"
 
+export const runtime = "nodejs"
+export const dynamic = "force-dynamic"
 export const maxDuration = 60 // Allow up to 60 seconds for visual analysis
 
 export async function POST(request: NextRequest) {
