@@ -1,116 +1,70 @@
 import type { WebsiteAnalysis, DesignSystem, Color, Typography } from "./types"
 import { VisualAnalyzer } from "./visual-analyzer"
 
-
 /**
  * Analyzes a website and extracts its design system
- * Uses HTML extraction for colors/typography (primary method)
- * Screenshot is optional for AI vision use
+ * HTML extraction is MANDATORY
+ * Visual extraction is OPTIONAL
  */
 export async function analyzeWebsite(
   url: string,
   captureScreenshot: boolean = false
 ): Promise<WebsiteAnalysis> {
+  const startedAt = Date.now()
+  logInfo("analysis:start", { url, captureScreenshot })
+
+  /* ──────────────────────────────
+     1️⃣ Validate URL
+     ────────────────────────────── */
   let urlObj: URL
   try {
     urlObj = new URL(url)
   } catch {
+    logError("analysis:invalid_url", { url })
     throw new Error("Invalid URL provided")
   }
 
-  let html: string = ""
-  let usePuppeteerFallback = false
-
-  // Always fetch HTML for title and basic structure
-  // Add timeout and better headers for Vercel compatibility
-  const controller = new AbortController()
-  const timeoutId = setTimeout(() => controller.abort(), 30000) // 30 second timeout
-
-  let response: Response | undefined
+  /* ──────────────────────────────
+     2️⃣ Mandatory HTML fetch
+     ────────────────────────────── */
+  let html: string
   try {
-    response = await fetch(url, {
-      headers: {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.9",
-        "Accept-Encoding": "gzip, deflate, br",
-        "Connection": "keep-alive",
-        "Upgrade-Insecure-Requests": "1",
-        "Sec-Fetch-Dest": "document",
-        "Sec-Fetch-Mode": "navigate",
-        "Sec-Fetch-Site": "none",
-        "Cache-Control": "max-age=0",
-      },
-      signal: controller.signal,
-      redirect: "follow",
+    html = await fetchHTMLStrict(url)
+    logInfo("analysis:html_fetched", {
+      domain: urlObj.hostname,
+      size: html.length,
     })
-    clearTimeout(timeoutId)
-
-    if (!response.ok) {
-      if (response.status === 403 || response.status === 401 || response.status === 429 || response.status >= 500) {
-        console.log(`Fetch failed with status ${response.status}, falling back to Puppeteer for ${url}`)
-        usePuppeteerFallback = true
-      } else {
-        throw new Error(`Failed to fetch website: ${response.status} ${response.statusText}`)
-      }
-    } else {
-      html = await response.text()
-    }
-  } catch (fetchError: any) {
-    clearTimeout(timeoutId)
-
-    if (
-      fetchError.name === 'AbortError' ||
-      fetchError.code === 'ENOTFOUND' ||
-      fetchError.code === 'ECONNREFUSED' ||
-      fetchError.message?.includes('fetch failed') ||
-      fetchError.message?.includes('blocked')
-    ) {
-      console.log(`Fetch failed, falling back to Puppeteer for ${url}:`, fetchError.message)
-      usePuppeteerFallback = true
-    } else {
-      if (fetchError.name === 'AbortError') {
-        throw new Error("Request timeout: The website took too long to respond. This might be due to slow loading or network restrictions.")
-      }
-      if (fetchError.code === 'ENOTFOUND' || fetchError.code === 'ECONNREFUSED') {
-        throw new Error(`Network error: Unable to connect to the website. The domain might be invalid or unreachable.`)
-      }
-      throw new Error(`Failed to fetch website: ${fetchError.message || 'Unknown error'}`)
-    }
+  } catch (err: any) {
+    logError("analysis:html_failed", { message: err.message })
+    throw err
   }
 
-  // Use Puppeteer as fallback if fetch was blocked or failed
-  if (usePuppeteerFallback) {
-    try {
-      console.log(`Using Puppeteer to fetch HTML for ${url}`)
-      const visualAnalyzer = new VisualAnalyzer()
-html = await visualAnalyzer.fetchHTML(url)
-      console.log(`Successfully fetched HTML using Puppeteer for ${url}`)
-    } catch (puppeteerError: any) {
-      throw new Error(`Failed to fetch website using browser: ${puppeteerError.message || 'The website may be blocking automated access or taking too long to load.'}`)
-    }
-  }
+  /* ──────────────────────────────
+     3️⃣ Extract metadata
+     ────────────────────────────── */
   const title = extractPageTitle(html) || urlObj.hostname
-
-  // Extract design system from HTML (primary method - reliable)
-  const designSystem = extractDesignSystem(html, url)
+  const designSystem = extractDesignSystem(html)
   const layout = extractLayoutStructure(html)
 
-  // Screenshot is optional - only capture if requested (for AI vision)
+  /* ──────────────────────────────
+     4️⃣ Optional screenshot (NON-BLOCKING)
+     ────────────────────────────── */
   let screenshot: string | undefined
+
   if (captureScreenshot) {
     try {
-      const visualAnalyzer = new VisualAnalyzer()
-screenshot = await visualAnalyzer.captureScreenshot(url)
-      
-      if (!screenshot) {
-        console.warn(`Screenshot not captured for ${url}. Possible reasons: bot detection, timeout, or website blocking.`)
-      }
-    } catch (screenshotError) {
-      console.warn("Screenshot capture failed, continuing without screenshot:", screenshotError)
-      // Continue without screenshot - not critical for design extraction
+      const visual = new VisualAnalyzer()
+      screenshot = (await visual.captureScreenshot(url)) || undefined
+      logInfo("analysis:screenshot", { success: Boolean(screenshot) })
+    } catch (err: any) {
+      logWarn("analysis:screenshot_failed", { message: err.message })
     }
   }
+
+  /* ──────────────────────────────
+     5️⃣ Final result
+     ────────────────────────────── */
+  logInfo("analysis:completed", { durationMs: Date.now() - startedAt })
 
   return {
     url,
@@ -122,19 +76,48 @@ screenshot = await visualAnalyzer.captureScreenshot(url)
   }
 }
 
-// Removed mergeColors and mergeTypography - now using HTML extraction only
+/* =========================================================
+   🔒 STRICT HTML FETCH (NO BROWSER EVER)
+   ========================================================= */
 
-/**
- * Extracts design system (colors, typography, spacing) from HTML
- */
-function extractDesignSystem(html: string, url: string): DesignSystem {
-  const colors = extractColors(html, url)
+async function fetchHTMLStrict(url: string): Promise<string> {
+  const controller = new AbortController()
+  const timeout = setTimeout(() => controller.abort(), 30_000)
 
-  const typography = extractTypography(html)
+  try {
+    const res = await fetch(url, {
+      signal: controller.signal,
+      redirect: "follow",
+      headers: {
+        "User-Agent":
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120",
+        Accept: "text/html,application/xhtml+xml",
+      },
+    })
 
+    if (!res.ok) {
+      throw new Error(`HTTP ${res.status} ${res.statusText}`)
+    }
+
+    return await res.text()
+  } catch (err: any) {
+    if (err.name === "AbortError") {
+      throw new Error("HTML fetch timeout (30s)")
+    }
+    throw new Error(`HTML fetch failed: ${err.message}`)
+  } finally {
+    clearTimeout(timeout)
+  }
+}
+
+/* =========================================================
+   🎨 DESIGN SYSTEM EXTRACTION
+   ========================================================= */
+
+function extractDesignSystem(html: string): DesignSystem {
   return {
-    colors,
-    typography,
+    colors: extractColors(html),
+    typography: extractTypography(html),
     components: [],
     spacing: {
       xs: "0.25rem",
@@ -162,197 +145,186 @@ function extractDesignSystem(html: string, url: string): DesignSystem {
   }
 }
 
-/**
- * Extracts color palette from CSS and HTML
- */
-function extractColors(html: string, baseUrl: string): Color[] {
-  const colors: Color[] = []
-  const colorSet = new Set<string>()
+/* =========================================================
+   🎨 COLOR EXTRACTION
+   ========================================================= */
 
-  // Extract from style tags
-  const styleRegex = /<style[^>]*>([\s\S]*?)<\/style>/gi
-  let styleMatch
-  const colorValueRegex = /#(?:[0-9a-fA-F]{3}){1,2}|rgb\([^)]*\)|rgba\([^)]*\)|hsl\([^)]*\)/gi
+function extractColors(html: string): Color[] {
+  const set = new Set<string>()
+  const regex =
+    /#(?:[0-9a-fA-F]{3}){1,2}|rgba?\(\d+,\s*\d+,\s*\d+/gi
 
-  while ((styleMatch = styleRegex.exec(html)) !== null) {
-    const styles = styleMatch[1]
-    let colorMatch
-    while ((colorMatch = colorValueRegex.exec(styles)) !== null) {
-      const hex = normalizeColor(colorMatch[0])
-      if (hex && !colorSet.has(hex) && isValidColor(hex)) {
-        colorSet.add(hex)
-      }
-    }
+  let match
+  while ((match = regex.exec(html)) !== null) {
+    const hex = normalizeColor(match[0])
+    if (hex && isValidColor(hex)) set.add(hex)
   }
 
-  // Extract from inline styles
-  const inlineStyleRegex = /style\s*=\s*["']([^"']*)["']/gi
-  while ((styleMatch = inlineStyleRegex.exec(html)) !== null) {
-    const styles = styleMatch[1]
-    let colorMatch
-    const inlineColorRegex = /(?:color|background|border)[^;]*:\s*([^;]+)/gi
-    while ((colorMatch = inlineColorRegex.exec(styles)) !== null) {
-      const hex = normalizeColor(colorMatch[1])
-      if (hex && !colorSet.has(hex) && isValidColor(hex)) {
-        colorSet.add(hex)
-      }
-    }
-  }
+  const colors = [...set].slice(0, 10).map((hex, i) => ({
+    hex,
+    usage: ["primary", "secondary", "accent", "neutral"][i % 4] as any,
+  }))
 
-  // Convert to Color objects with usage categorization
-  Array.from(colorSet).forEach((hex, idx) => {
-    const usage = categorizeColorUsage(hex, idx) as "primary" | "secondary" | "accent" | "neutral" | "background"
-    colors.push({
-      hex,
-      usage,
-    })
-  })
-
-  // Ensure we have at least some colors
-  if (colors.length === 0) {
-    colors.push(
+  return colors.length
+    ? colors
+    : [
       { hex: "#000000", usage: "neutral" },
       { hex: "#FFFFFF", usage: "background" },
-      { hex: "#3B82F6", usage: "primary" },
-      { hex: "#6366F1", usage: "accent" },
-      { hex: "#8B5CF6", usage: "secondary" },
-    )
-  }
-
-  return colors.slice(0, 10) // Return top 10 colors
+    ]
 }
 
-/**
- * Extracts typography information from CSS
- */
+/* =========================================================
+   🔤 TYPOGRAPHY (SEMANTIC + CSS HYBRID)
+   ========================================================= */
+
 function extractTypography(html: string): Typography[] {
   const typography: Typography[] = []
-  const fontFamilies = new Set<string>()
 
-  // Extract from style tags
-  const styleRegex = /<style[^>]*>([\s\S]*?)<\/style>/gi
-  let styleMatch
-  const fontFamilyRegex = /font-family\s*:\s*([^;]+)/gi
-
-  while ((styleMatch = styleRegex.exec(html)) !== null) {
-    const styles = styleMatch[1]
-    let fontMatch
-    while ((fontMatch = fontFamilyRegex.exec(styles)) !== null) {
-      const family = fontMatch[1].trim().replace(/['"]/g, "").split(",")[0].trim()
-      if (family && family.length > 0) {
-        fontFamilies.add(family)
-      }
-    }
+  /* ---------------------------------------------
+     1️⃣ Detect font-family (best effort)
+     --------------------------------------------- */
+  let fontFamily = "system-ui"
+  const fontMatch = /font-family\s*:\s*([^;]+)/i.exec(html)
+  if (fontMatch) {
+    fontFamily = fontMatch[1]
+      .replace(/['"]/g, "")
+      .split(",")[0]
+      .trim()
   }
 
-  // Default typography if none found
-  const families = Array.from(fontFamilies).slice(0, 2)
-  if (families.length === 0) {
-    families.push("system-ui", "sans-serif")
-  }
+  /* ---------------------------------------------
+     2️⃣ Detect largest heading level
+     --------------------------------------------- */
+  const headingLevels = [
+    { tag: "h1", size: "2.25rem", weight: 700 },
+    { tag: "h2", size: "1.875rem", weight: 600 },
+    { tag: "h3", size: "1.5rem", weight: 600 },
+    { tag: "h4", size: "1.25rem", weight: 600 },
+  ]
 
-  // Create typography entries
-  const usages: Array<"heading" | "body" | "caption"> = ["heading", "body", "caption"]
-  const fontWeights = [700, 400, 600]
-  const fontSizes = ["2.25rem", "1rem", "0.875rem"]
+  const primaryHeading = headingLevels.find(({ tag }) =>
+    new RegExp(`<${tag}[\\s>]`, "i").test(html)
+  )
 
-  families.forEach((family, familyIdx) => {
-    usages.forEach((usage, usageIdx) => {
-      typography.push({
-        fontFamily: family,
-        fontWeight: fontWeights[usageIdx] || 400,
-        fontSize: fontSizes[usageIdx] || "1rem",
-        lineHeight: "1.5",
-        usage,
-      })
+  if (primaryHeading) {
+    typography.push({
+      fontFamily,
+      fontWeight: primaryHeading.weight,
+      fontSize: primaryHeading.size,
+      lineHeight: "1.2",
+      usage: "heading",
     })
-  })
+  }
 
-  return typography.slice(0, 5)
+  /* ---------------------------------------------
+     3️⃣ Body text
+     --------------------------------------------- */
+  if (/<p[\s>]|<div[\s>]/i.test(html)) {
+    typography.push({
+      fontFamily,
+      fontWeight: 400,
+      fontSize: "1rem",
+      lineHeight: "1.5",
+      usage: "body",
+    })
+  }
+
+  /* ---------------------------------------------
+     4️⃣ Caption / UI text
+     --------------------------------------------- */
+  if (/<button[\s>]|<a[\s>]|<label[\s>]/i.test(html)) {
+    typography.push({
+      fontFamily,
+      fontWeight: 500,
+      fontSize: "0.875rem",
+      lineHeight: "1.4",
+      usage: "caption",
+    })
+  }
+
+  /* ---------------------------------------------
+     5️⃣ Guaranteed fallback
+     --------------------------------------------- */
+  if (typography.length === 0) {
+    typography.push({
+      fontFamily: "system-ui",
+      fontWeight: 400,
+      fontSize: "1rem",
+      lineHeight: "1.5",
+      usage: "body",
+    })
+  }
+
+  return typography
 }
 
-/**
- * Extracts page layout structure
- */
-function extractLayoutStructure(html: string): { type: "single-column" | "multi-column" | "grid"; sections: string[] } {
+
+/* =========================================================
+   📐 LAYOUT EXTRACTION
+   ========================================================= */
+
+function extractLayoutStructure(html: string) {
   const sections: string[] = []
 
-  // Look for common semantic sections
-  const sectionTags = ["header", "nav", "main", "section", "article", "footer", '[role="main"]', '[role="navigation"]']
-
-  sectionTags.forEach((tag) => {
-    if (html.includes(`<${tag}`) || html.includes(tag)) {
-      sections.push(tag.replace(/[<>[\]"]/g, "").split(" ")[0])
-    }
-  })
-
-  // Default sections if none found
-  if (sections.length === 0) {
-    sections.push("header", "main", "footer")
-  }
+    ;["header", "nav", "main", "section", "article", "footer"].forEach((tag) => {
+      if (html.includes(`<${tag}`)) sections.push(tag)
+    })
 
   return {
-    type: "multi-column",
-    sections: Array.from(new Set(sections)),
+    type: sections.length > 2 ? "multi-column" : "single-column",
+    sections: sections.length ? [...new Set(sections)] : ["main"],
   }
 }
 
-/**
- * Extract page title from HTML
- */
+/* =========================================================
+   🧰 HELPERS
+   ========================================================= */
+
 function extractPageTitle(html: string): string | null {
-  const titleMatch = html.match(/<title[^>]*>([\s\S]*?)<\/title>/i)
-  return titleMatch ? titleMatch[1].trim() : null
+  const match = html.match(/<title[^>]*>(.*?)<\/title>/i)
+  return match ? match[1].trim() : null
 }
 
-/**
- * Helper: Normalize color to hex format
- */
 function normalizeColor(color: string): string | null {
-  color = color.trim()
-
-  // Already hex
   if (color.startsWith("#")) {
-    if (/^#(?:[0-9a-fA-F]{3}){1,2}$/.test(color)) {
-      return color.length === 4 ? expandHex(color) : color.toUpperCase()
-    }
-    return null
+    return color.length === 4
+      ? "#" +
+      color
+        .slice(1)
+        .split("")
+        .map((c) => c + c)
+        .join("")
+        .toUpperCase()
+      : color.toUpperCase()
   }
 
-  // RGB/RGBA
-  const rgbMatch = color.match(/rgba?\((\d+),\s*(\d+),\s*(\d+)/)
-  if (rgbMatch) {
-    const r = Number.parseInt(rgbMatch[1]).toString(16).padStart(2, "0")
-    const g = Number.parseInt(rgbMatch[2]).toString(16).padStart(2, "0")
-    const b = Number.parseInt(rgbMatch[3]).toString(16).padStart(2, "0")
-    return `#${r}${g}${b}`.toUpperCase()
-  }
+  const m = color.match(/rgb\((\d+),\s*(\d+),\s*(\d+)/)
+  if (!m) return null
 
-  return null
-}
-
-function expandHex(hex: string): string {
   return (
     "#" +
-    hex
-      .slice(1)
-      .split("")
-      .map((c) => c + c)
+    [m[1], m[2], m[3]]
+      .map((v) => Number(v).toString(16).padStart(2, "0"))
       .join("")
-  )
+  ).toUpperCase()
 }
 
-/**
- * Helper: Check if color is valid (not white/black filters)
- */
-function isValidColor(hex: string): boolean {
-  return hex !== "#000000" && hex !== "#FFFFFF" && hex.length === 7
+function isValidColor(hex: string) {
+  return hex.length === 7 && hex !== "#000000" && hex !== "#FFFFFF"
 }
 
-/**
- * Helper: Categorize color by index and value
- */
-function categorizeColorUsage(hex: string, index: number): string {
-  const usage = ["primary", "secondary", "accent", "neutral", "background"]
-  return usage[index % usage.length]
+/* =========================================================
+   📊 LOGGING (VERCEL SAFE)
+   ========================================================= */
+
+function logInfo(event: string, data: Record<string, any>) {
+  console.log(`ℹ️ ${event}`, data)
+}
+
+function logWarn(event: string, data: Record<string, any>) {
+  console.warn(`⚠️ ${event}`, data)
+}
+
+function logError(event: string, data: Record<string, any>) {
+  console.error(`❌ ${event}`, data)
 }

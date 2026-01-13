@@ -1,75 +1,54 @@
-import * as puppeteer from "puppeteer-core"
+import puppeteer from "puppeteer"
+import puppeteerCore from "puppeteer-core"
 import chromium from "@sparticuz/chromium"
 import type { Browser } from "puppeteer-core"
 import type { Color } from "./types"
 
-/**
- * Detect Vercel environment
- */
 const isVercel = !!process.env.VERCEL
 
-/**
- * Cache Chromium executable path
- */
-let cachedChromiumPath: string | null = null
+async function launchBrowser(): Promise<Browser | null> {
+  try {
+    if (!isVercel) {
+      // ✅ LOCAL: bundled Chromium
+      return await puppeteer.launch({
+        headless: true,
+      })
+    }
 
-async function getChromiumExecutablePath(): Promise<string> {
-  if (!cachedChromiumPath) {
-    cachedChromiumPath = isVercel
-      ? await chromium.executablePath()
-      : getLocalChromePath()
-
-    console.log("🧭 Chromium executable:", cachedChromiumPath)
+    // ✅ VERCEL
+    return await puppeteerCore.launch({
+      executablePath: await chromium.executablePath(),
+      args: chromium.args,
+      headless: chromium.headless,
+      defaultViewport: chromium.defaultViewport,
+    })
+  } catch (err: any) {
+    console.warn("⚠️ Browser launch failed", err.message)
+    return null
   }
-  return cachedChromiumPath
 }
 
-/**
- * Resolve local Chrome executable path
- */
-function getLocalChromePath(): string {
-  if (process.platform === "win32") {
-    return "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe"
-  }
-  if (process.platform === "darwin") {
-    return "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
-  }
-  return "/usr/bin/google-chrome"
-}
-
-/**
- * Launch browser (Vercel-safe)
- */
-async function launchBrowser(): Promise<Browser> {
-  return puppeteer.launch({
-    executablePath: await getChromiumExecutablePath(),
-    headless: chromium.headless,
-    args: chromium.args,
-    defaultViewport: chromium.defaultViewport,
-    ignoreHTTPSErrors: true,
-  })
-}
-
-/**
- * Singleton accessor (important for serverless)
- */
-let analyzer: VisualAnalyzer | null = null
-export function getVisualAnalyzer(): VisualAnalyzer {
-  if (!analyzer) analyzer = new VisualAnalyzer()
-  return analyzer
-}
+/* =========================================================
+   🎨 Visual Analyzer (OPTIONAL ONLY)
+   ========================================================= */
 
 export class VisualAnalyzer {
   /**
-   * Capture screenshot
+   * Capture screenshot (NON-BLOCKING)
    */
-  async captureScreenshot(url: string): Promise<string> {
+  async captureScreenshot(url: string): Promise<string | null> {
     const browser = await launchBrowser()
-    const page = await browser.newPage()
+    if (!browser) return null
 
+    let page
     try {
+      page = await browser.newPage()
+
       await page.setViewport({ width: 1920, height: 1080 })
-      await page.goto(url, { waitUntil: "networkidle2", timeout: 30000 })
+      await page.goto(url, {
+        waitUntil: "networkidle2",
+        timeout: 25_000,
+      })
 
       const screenshot = await page.screenshot({
         type: "png",
@@ -77,69 +56,72 @@ export class VisualAnalyzer {
       })
 
       return `data:image/png;base64,${screenshot}`
-    } finally {
-      await page.close()
-      await browser.close()
-    }
-  }
-
-  /**
-   * Fetch rendered HTML
-   */
-  async fetchHTML(url: string): Promise<string> {
-    const browser = await launchBrowser()
-    const page = await browser.newPage()
-
-    try {
-      await page.goto(url, {
-        waitUntil: "domcontentloaded",
-        timeout: 20000,
+    } catch (err: any) {
+      console.warn("⚠️ Screenshot failed", {
+        url,
+        message: err.message,
       })
-      return await page.content()
+      return null
     } finally {
-      await page.close()
-      await browser.close()
+      try {
+        await page?.close()
+        await browser.close()
+      } catch { }
     }
   }
 
   /**
-   * Extract dominant visual colors
+   * Extract dominant visual colors (NON-BLOCKING)
    */
   async extractVisualColors(url: string): Promise<Color[]> {
     const browser = await launchBrowser()
-    const page = await browser.newPage()
+    if (!browser) return []
 
+    let page
     try {
-      await page.goto(url, { waitUntil: "networkidle2", timeout: 30000 })
+      page = await browser.newPage()
+
+      await page.goto(url, {
+        waitUntil: "networkidle2",
+        timeout: 25_000,
+      })
 
       const colors = await page.evaluate(() => {
         const set = new Set<string>()
 
-        const rgbToHex = (r: number, g: number, b: number) =>
-          "#" + [r, g, b].map(x => x.toString(16).padStart(2, "0")).join("")
+        const toHex = (r: number, g: number, b: number) =>
+          "#" + [r, g, b].map(v => v.toString(16).padStart(2, "0")).join("")
 
         document.querySelectorAll("*").forEach(el => {
           const s = getComputedStyle(el)
-          const extract = (v: string) => {
-            const m = v.match(/rgba?\((\d+),\s*(\d+),\s*(\d+)/)
-            if (m) set.add(rgbToHex(+m[1], +m[2], +m[3]))
-          }
 
-          extract(s.color)
-          extract(s.backgroundColor)
-          extract(s.borderColor)
+          const match = s.backgroundColor.match(
+            /rgba?\((\d+),\s*(\d+),\s*(\d+)/
+          )
+
+          if (match) {
+            set.add(toHex(+match[1], +match[2], +match[3]))
+          }
         })
 
-        return Array.from(set)
+        return [...set]
       })
 
-      return colors.slice(0, 12).map((hex, i) => ({
+      return colors.slice(0, 8).map((hex, i) => ({
         hex,
         usage: ["primary", "secondary", "accent", "neutral"][i % 4] as any,
       }))
+    } catch (err: any) {
+      console.warn("⚠️ Visual color extraction failed", {
+        url,
+        message: err.message,
+      })
+      return []
     } finally {
-      await page.close()
-      await browser.close()
+      try {
+        await page?.close()
+        await browser.close()
+      } catch { }
     }
   }
 }
