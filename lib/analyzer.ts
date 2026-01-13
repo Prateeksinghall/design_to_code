@@ -1,5 +1,6 @@
 import type { WebsiteAnalysis, DesignSystem, Color, Typography } from "./types"
-import { getVisualAnalyzer } from "./visual-analyzer"
+import { VisualAnalyzer } from "./visual-analyzer"
+
 
 /**
  * Analyzes a website and extracts its design system
@@ -82,8 +83,8 @@ export async function analyzeWebsite(
   if (usePuppeteerFallback) {
     try {
       console.log(`Using Puppeteer to fetch HTML for ${url}`)
-      const visualAnalyzer = getVisualAnalyzer()
-      html = await visualAnalyzer.fetchHTML(url)
+      const visualAnalyzer = new VisualAnalyzer()
+html = await visualAnalyzer.fetchHTML(url)
       console.log(`Successfully fetched HTML using Puppeteer for ${url}`)
     } catch (puppeteerError: any) {
       throw new Error(`Failed to fetch website using browser: ${puppeteerError.message || 'The website may be blocking automated access or taking too long to load.'}`)
@@ -99,8 +100,8 @@ export async function analyzeWebsite(
   let screenshot: string | undefined
   if (captureScreenshot) {
     try {
-      const visualAnalyzer = getVisualAnalyzer()
-      screenshot = await visualAnalyzer.captureScreenshot(url)
+      const visualAnalyzer = new VisualAnalyzer()
+screenshot = await visualAnalyzer.captureScreenshot(url)
       
       if (!screenshot) {
         console.warn(`Screenshot not captured for ${url}. Possible reasons: bot detection, timeout, or website blocking.`)

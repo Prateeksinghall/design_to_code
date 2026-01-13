@@ -1,12 +1,29 @@
-import puppeteer, { Browser } from "puppeteer-core"
+import puppeteer from "puppeteer-core"
 import chromium from "@sparticuz/chromium"
-import fs from "fs"
+import type { Browser } from "puppeteer-core"
 import type { Color } from "./types"
 
 /**
  * Detect Vercel environment
  */
-const isVercel = process.env.VERCEL === "1"
+const isVercel = !!process.env.VERCEL
+
+/**
+ * Cache Chromium executable path (SAFE)
+ */
+let cachedChromiumPath: string | null = null
+
+async function getChromiumExecutablePath(): Promise<string> {
+  if (!cachedChromiumPath) {
+    cachedChromiumPath = isVercel
+      ? await chromium.executablePath()
+      : getLocalChromePath()
+
+    console.log("🧭 Chromium executable:", cachedChromiumPath)
+  }
+
+  return cachedChromiumPath
+}
 
 /**
  * Resolve local Chrome executable path
@@ -24,118 +41,25 @@ function getLocalChromePath(): string {
 }
 
 /**
- * 🔥 Force fresh Chromium extraction on Vercel
- * Fixes: libnss3.so missing error
+ * Launch browser (PER REQUEST – serverless safe)
  */
-function forceFreshChromium() {
-  if (!isVercel) return
-
-  const chromiumPath = "/tmp/chromium"
-
-  try {
-    if (fs.existsSync(chromiumPath)) {
-      console.warn("♻️ Removing stale Chromium from /tmp")
-      fs.rmSync(chromiumPath, { recursive: true, force: true })
-    }
-  } catch (err) {
-    console.warn("⚠️ Failed to clean Chromium cache", err)
-  }
+async function launchBrowser(): Promise<Browser> {
+  return puppeteer.launch({
+    executablePath: await getChromiumExecutablePath(),
+    headless: isVercel ? chromium.headless : true,
+    args: isVercel ? chromium.args : ["--no-sandbox"],
+    defaultViewport: chromium.defaultViewport,
+    ignoreHTTPSErrors: true,
+  })
 }
 
 export class VisualAnalyzer {
-  private browser: Browser | null = null
-  private launching = false
-
-  private isBrowserHealthy(): boolean {
-    return !!this.browser && this.browser.isConnected()
-  }
-
-  private async resetBrowser() {
-    try {
-      if (this.browser) {
-        await this.browser.close()
-      }
-    } catch {
-      // ignore
-    } finally {
-      this.browser = null
-    }
-  }
-
   /**
-   * Initialize browser (self-healing)
+   * Capture screenshot
    */
-  async init(): Promise<void> {
-    if (this.isBrowserHealthy() || this.launching) return
-
-    this.launching = true
-
-    try {
-      console.log("🚀 Launching browser...")
-      console.log("🌍 Vercel:", isVercel)
-
-      await this.resetBrowser()
-
-      if (isVercel) {
-        // 🔥 CRITICAL FIX
-        forceFreshChromium()
-
-        const executablePath = await chromium.executablePath()
-        console.log("🧭 Chromium path:", executablePath)
-
-        this.browser = await puppeteer.launch({
-          executablePath,
-          headless: chromium.headless,
-          defaultViewport: chromium.defaultViewport,
-          ignoreHTTPSErrors: true,
-          args: [
-            ...chromium.args,
-            "--disable-dev-shm-usage",
-            "--disable-gpu",
-            "--single-process",
-          ],
-        })
-      } else {
-        this.browser = await puppeteer.launch({
-          executablePath: getLocalChromePath(),
-          headless: true,
-          args: [
-            "--no-sandbox",
-            "--disable-setuid-sandbox",
-            "--disable-dev-shm-usage",
-          ],
-        })
-      }
-
-      console.log("✅ Browser launched successfully")
-    } catch (error: any) {
-      console.error("❌ Browser launch failed:", error)
-      await this.resetBrowser()
-      throw new Error(
-        `Browser initialization failed: ${error?.message || "Unknown error"}`
-      )
-    } finally {
-      this.launching = false
-    }
-  }
-
-  /**
-   * Create page with auto-recovery
-   */
-  private async newSafePage() {
-    try {
-      await this.init()
-      return await this.browser!.newPage()
-    } catch {
-      console.warn("♻️ Browser unhealthy, retrying...")
-      await this.resetBrowser()
-      await this.init()
-      return await this.browser!.newPage()
-    }
-  }
-
   async captureScreenshot(url: string): Promise<string> {
-    const page = await this.newSafePage()
+    const browser = await launchBrowser()
+    const page = await browser.newPage()
 
     try {
       await page.setViewport({ width: 1920, height: 1080 })
@@ -144,28 +68,37 @@ export class VisualAnalyzer {
       const screenshot = await page.screenshot({
         type: "png",
         encoding: "base64",
-        fullPage: false,
       })
 
       return `data:image/png;base64,${screenshot}`
     } finally {
       await page.close()
+      await browser.close()
     }
   }
 
+  /**
+   * Fetch rendered HTML
+   */
   async fetchHTML(url: string): Promise<string> {
-    const page = await this.newSafePage()
+    const browser = await launchBrowser()
+    const page = await browser.newPage()
 
     try {
       await page.goto(url, { waitUntil: "domcontentloaded", timeout: 20000 })
       return await page.content()
     } finally {
       await page.close()
+      await browser.close()
     }
   }
 
+  /**
+   * Extract dominant visual colors
+   */
   async extractVisualColors(url: string): Promise<Color[]> {
-    const page = await this.newSafePage()
+    const browser = await launchBrowser()
+    const page = await browser.newPage()
 
     try {
       await page.goto(url, { waitUntil: "networkidle2", timeout: 30000 })
@@ -178,12 +111,16 @@ export class VisualAnalyzer {
 
         document.querySelectorAll("*").forEach(el => {
           const styles = getComputedStyle(el)
-          const parse = (c: string) => {
-            const m = c.match(/rgba?\((\d+),\s*(\d+),\s*(\d+)/)
-            if (m) set.add(rgbToHex(+m[1], +m[2], +m[3]))
+          const extract = (value: string) => {
+            const match = value.match(/rgba?\((\d+),\s*(\d+),\s*(\d+)/)
+            if (match) {
+              set.add(rgbToHex(+match[1], +match[2], +match[3]))
+            }
           }
-          parse(styles.color)
-          parse(styles.backgroundColor)
+
+          extract(styles.color)
+          extract(styles.backgroundColor)
+          extract(styles.borderColor)
         })
 
         return Array.from(set)
@@ -195,35 +132,46 @@ export class VisualAnalyzer {
       }))
     } finally {
       await page.close()
+      await browser.close()
     }
   }
 
+  /**
+   * Extract typography styles
+   */
   async extractVisualTypography(url: string) {
-    const page = await this.newSafePage()
+    const browser = await launchBrowser()
+    const page = await browser.newPage()
 
     try {
       await page.goto(url, { waitUntil: "networkidle2", timeout: 30000 })
 
       return await page.evaluate(() =>
-        Array.from(document.querySelectorAll("h1,h2,h3,p,span"))
-          .slice(0, 6)
+        Array.from(document.querySelectorAll("h1,h2,h3,h4,p,span"))
+          .slice(0, 10)
           .map(el => {
             const s = getComputedStyle(el)
             return {
               fontFamily: s.fontFamily.split(",")[0],
               fontSize: s.fontSize,
               fontWeight: s.fontWeight,
+              lineHeight: s.lineHeight,
               usage: el.tagName.startsWith("H") ? "heading" : "body",
             }
           })
       )
     } finally {
       await page.close()
+      await browser.close()
     }
   }
 
+  /**
+   * Analyze layout structure
+   */
   async analyzeVisualLayout(url: string) {
-    const page = await this.newSafePage()
+    const browser = await launchBrowser()
+    const page = await browser.newPage()
 
     try {
       await page.goto(url, { waitUntil: "networkidle2", timeout: 30000 })
@@ -240,19 +188,7 @@ export class VisualAnalyzer {
       })
     } finally {
       await page.close()
+      await browser.close()
     }
   }
-}
-
-/**
- * ⚠️ OPTIONAL SINGLETON
- * Safe to remove if you want full stateless behavior
- */
-let instance: VisualAnalyzer | null = null
-
-export function getVisualAnalyzer(): VisualAnalyzer {
-  if (!instance) {
-    instance = new VisualAnalyzer()
-  }
-  return instance
 }
